@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: cineanalyst-ai
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-3.6-flash
+      - key: CLICKHOUSE_HOST
+        sync: false
+      - key: CLICKHOUSE_PORT
+        value: "8443"
+      - key: CLICKHOUSE_USER
+        value: default
+      - key: CLICKHOUSE_PASSWORD
+        sync: false
+      - key: CLICKHOUSE_DATABASE
+        value: default
