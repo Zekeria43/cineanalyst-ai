@@ -32,16 +32,17 @@ app = FastAPI(
 # CORS
 # ============================================================
 
-# TEMPORARY / TEST CONFIGURATION
-# Allows the deployed frontend to communicate with Render.
+# ============================================================
+# CORS
+# ============================================================
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # ============================================================
 # ENV VARIABLES
