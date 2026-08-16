@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
+const API_URL = "https://cineanalyst-ai.onrender.com";
 
-const API_URL = "https://cineanalyst-ai-zekeria.onrender.com";
 
 const quickQuestions = [
   "Which movie generated the most revenue?",
