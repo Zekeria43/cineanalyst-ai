@@ -1,6 +1,7 @@
 import os
 import re
 import traceback
+from typing import Any
 
 import clickhouse_connect
 from dotenv import load_dotenv
@@ -15,15 +16,6 @@ from google import genai
 # ============================================================
 
 load_dotenv()
-
-CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST")
-CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", "8443"))
-CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
-CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD")
-CLICKHOUSE_DATABASE = os.getenv("CLICKHOUSE_DATABASE", "default")
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 
 # ============================================================
@@ -45,7 +37,6 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://cineanalyst-dashboard.onrender.com",
-        "https://cineanalyst-ai-zekeria.onrender.com",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ],
@@ -56,72 +47,81 @@ app.add_middleware(
 
 
 # ============================================================
+# ENV VARIABLES
+# ============================================================
+
+CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST")
+CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", "8443"))
+CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "default")
+CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD")
+CLICKHOUSE_DATABASE = os.getenv("CLICKHOUSE_DATABASE", "default")
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv(
+    "GEMINI_MODEL",
+    "gemini-3.6-flash",
+)
+
+
+# ============================================================
 # GLOBAL CLIENTS
 # ============================================================
 
-clickhouse_client = None
-gemini_client = None
+client = None
+gemini = None
 
 
 # ============================================================
-# STARTUP
+# CLICKHOUSE CONNECTION
 # ============================================================
 
-@app.on_event("startup")
-def startup_event():
-    global clickhouse_client
-    global gemini_client
+try:
+    if not CLICKHOUSE_HOST:
+        print("WARNING: CLICKHOUSE_HOST is not configured.")
+    elif not CLICKHOUSE_PASSWORD:
+        print("WARNING: CLICKHOUSE_PASSWORD is not configured.")
+    else:
+        client = clickhouse_connect.get_client(
+            host=CLICKHOUSE_HOST,
+            port=CLICKHOUSE_PORT,
+            username=CLICKHOUSE_USER,
+            password=CLICKHOUSE_PASSWORD,
+            database=CLICKHOUSE_DATABASE,
+            secure=True,
+        )
 
-    # --------------------------------------------------------
-    # ClickHouse
-    # --------------------------------------------------------
+        client.query("SELECT 1")
 
-    try:
-        if CLICKHOUSE_HOST and CLICKHOUSE_PASSWORD:
-            clickhouse_client = clickhouse_connect.get_client(
-                host=CLICKHOUSE_HOST,
-                port=CLICKHOUSE_PORT,
-                username=CLICKHOUSE_USER,
-                password=CLICKHOUSE_PASSWORD,
-                database=CLICKHOUSE_DATABASE,
-                secure=True,
-            )
+        print("ClickHouse connection: OK")
 
-            clickhouse_client.query("SELECT 1")
-
-            print("ClickHouse connection: OK")
-
-        else:
-            print("WARNING: ClickHouse credentials are not configured.")
-
-    except Exception:
-        print("ClickHouse connection: FAILED")
-        traceback.print_exc()
-        clickhouse_client = None
-
-    # --------------------------------------------------------
-    # Gemini
-    # --------------------------------------------------------
-
-    try:
-        if GEMINI_API_KEY:
-            gemini_client = genai.Client(
-                api_key=GEMINI_API_KEY
-            )
-
-            print(f"Gemini client: OK - model: {GEMINI_MODEL}")
-
-        else:
-            print("WARNING: GEMINI_API_KEY is not configured.")
-
-    except Exception:
-        print("Gemini client: FAILED")
-        traceback.print_exc()
-        gemini_client = None
+except Exception:
+    print("ClickHouse connection: FAILED")
+    traceback.print_exc()
+    client = None
 
 
 # ============================================================
-# REQUEST MODEL
+# GEMINI CONNECTION
+# ============================================================
+
+try:
+    if GEMINI_API_KEY:
+        gemini = genai.Client(
+            api_key=GEMINI_API_KEY
+        )
+
+        print("Gemini client: OK")
+    else:
+        print("WARNING: GEMINI_API_KEY is not configured.")
+
+except Exception:
+    print("Gemini client: FAILED")
+    traceback.print_exc()
+    gemini = None
+
+
+# ============================================================
+# REQUEST MODELS
 # ============================================================
 
 class QuestionRequest(BaseModel):
@@ -129,10 +129,14 @@ class QuestionRequest(BaseModel):
 
 
 # ============================================================
-# HELPERS
+# HELPER FUNCTIONS
 # ============================================================
 
-def format_value(value):
+def format_value(value: Any):
+    """
+    Convert ClickHouse/Python values into JSON-friendly values.
+    """
+
     if value is None:
         return None
 
@@ -147,7 +151,7 @@ def format_value(value):
 
 def clean_sql(sql: str) -> str:
     """
-    Clean SQL returned by Gemini.
+    Clean Gemini-generated SQL.
     """
 
     if not sql:
@@ -155,26 +159,20 @@ def clean_sql(sql: str) -> str:
 
     sql = sql.strip()
 
-    # Remove Markdown code fences
-    sql = re.sub(r"^```(?:sql)?", "", sql, flags=re.IGNORECASE)
-    sql = re.sub(r"```$", "", sql)
+    # Remove markdown code fences
+    sql = re.sub(r"^```sql\s*", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"^```\s*", "", sql)
+    sql = re.sub(r"\s*```$", "", sql)
 
-    sql = sql.strip()
+    # Remove unwanted semicolon at the end
+    sql = sql.strip().rstrip(";").strip()
 
-    # Remove accidental prefixes
-    sql = re.sub(
-        r"^(SQL\s*:|QUERY\s*:)\s*",
-        "",
-        sql,
-        flags=re.IGNORECASE,
-    )
-
-    return sql.strip()
+    return sql
 
 
-def validate_sql(sql: str) -> bool:
+def is_safe_sql(sql: str) -> bool:
     """
-    Only allow read-only SQL.
+    Only allow read-only SQL queries.
     """
 
     if not sql:
@@ -189,7 +187,7 @@ def validate_sql(sql: str) -> bool:
     ):
         return False
 
-    # Block dangerous operations
+    # Block write/destructive operations
     forbidden = [
         "insert ",
         "update ",
@@ -199,11 +197,11 @@ def validate_sql(sql: str) -> bool:
         "truncate ",
         "create ",
         "replace ",
-        "grant ",
-        "revoke ",
         "attach ",
         "detach ",
         "optimize ",
+        "grant ",
+        "revoke ",
         "system ",
     ]
 
@@ -214,177 +212,104 @@ def validate_sql(sql: str) -> bool:
     return True
 
 
-# ============================================================
-# LOCAL SQL FALLBACK
-# ============================================================
-
-def local_sql_fallback(question: str):
+def get_movies_schema() -> str:
     """
-    Simple deterministic SQL fallback for common questions.
+    Get the schema of default.movies.
     """
 
-    q = question.lower().strip()
+    if client is None:
+        return ""
 
-    # Most revenue
-    if (
-        "most revenue" in q
-        or "highest revenue" in q
-        or "maximum revenue" in q
-        or "top revenue" in q
-        or "highest earning" in q
-    ):
-        return """
-SELECT
-    title,
-    revenue
-FROM default.movies
-WHERE revenue IS NOT NULL
-ORDER BY revenue DESC
-LIMIT 1
-""".strip()
+    result = client.query("""
+        SELECT
+            name,
+            type
+        FROM system.columns
+        WHERE database = 'default'
+          AND table = 'movies'
+        ORDER BY position
+    """)
 
-    # Most popular
-    if "most popular" in q or "highest popularity" in q:
-        return """
-SELECT
-    title,
-    popularity
-FROM default.movies
-WHERE popularity IS NOT NULL
-ORDER BY popularity DESC
-LIMIT 1
-""".strip()
-
-    # Highest rating
-    if (
-        "highest rating" in q
-        or "best rated" in q
-        or "highest rated" in q
-    ):
-        return """
-SELECT
-    title,
-    vote_average
-FROM default.movies
-WHERE vote_average IS NOT NULL
-ORDER BY vote_average DESC
-LIMIT 1
-""".strip()
-
-    # Number of movies
-    if (
-        "how many movies" in q
-        or "number of movies" in q
-        or "count movies" in q
-    ):
-        return """
-SELECT
-    count(*) AS movie_count
-FROM default.movies
-""".strip()
-
-    return None
-
-
-# ============================================================
-# DATABASE QUERY
-# ============================================================
-
-def execute_query(sql: str):
-    if clickhouse_client is None:
-        raise RuntimeError("ClickHouse client is not available.")
-
-    result = clickhouse_client.query(sql)
-
-    columns = list(result.column_names)
-
-    rows = []
+    schema_lines = []
 
     for row in result.result_rows:
-        item = {}
+        name = row[0]
+        data_type = row[1]
+        schema_lines.append(f"- {name}: {data_type}")
 
-        for index, column in enumerate(columns):
-            item[column] = format_value(row[index])
-
-        rows.append(item)
-
-    return columns, rows
+    return "\n".join(schema_lines)
 
 
-# ============================================================
-# GEMINI SQL GENERATION
-# ============================================================
+def generate_sql(question: str) -> str:
+    """
+    Generate SQL from natural language using Gemini.
+    """
 
-def generate_sql_with_gemini(question: str):
-    if gemini_client is None:
-        return None
+    if gemini is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini AI is not configured."
+        )
 
-    schema = """
-Database: ClickHouse
-Table: default.movies
-
-Available columns may include:
-- title
-- revenue
-- popularity
-- vote_average
-- vote_count
-- budget
-- release_date
-- runtime
-- genres
-- overview
-- original_language
-- original_title
-"""
+    schema = get_movies_schema()
 
     prompt = f"""
-You are CineAnalyst AI, a movie analytics SQL assistant.
+You are an expert ClickHouse SQL assistant.
 
-Convert the user's natural-language question into ONE safe ClickHouse SQL query.
+Convert the user's natural-language question into ONE safe,
+read-only ClickHouse SQL query.
 
-Rules:
-1. Return ONLY SQL.
-2. Use only the table default.movies.
-3. Use SELECT or WITH queries only.
-4. Never modify data.
-5. Never use INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, CREATE, or other write operations.
-6. If the user asks for the movie with the highest revenue, sort revenue DESC and LIMIT 1.
-7. Prefer explicit column names.
-8. Add LIMIT when returning movie rows.
-9. Do not use Markdown code fences.
+Database:
+default
 
+Main table:
+default.movies
+
+Table schema:
 {schema}
+
+Important rules:
+
+1. Return ONLY SQL.
+2. Do not use Markdown.
+3. Only generate SELECT or WITH queries.
+4. Never generate INSERT, UPDATE, DELETE, DROP, ALTER, CREATE,
+   TRUNCATE, SYSTEM, GRANT or REVOKE.
+5. Use the exact column names from the schema.
+6. For "most revenue", sort revenue DESC.
+7. For "highest rated", sort rating DESC.
+8. For counting movies, use COUNT(*).
+9. For averages, use AVG().
+10. For questions asking for a single best/worst movie, use LIMIT 1.
+11. Use ClickHouse-compatible SQL.
+12. Use default.movies explicitly.
+13. Do not invent columns.
 
 User question:
 {question}
 """
 
     try:
-        response = gemini_client.models.generate_content(
+        response = gemini.models.generate_content(
             model=GEMINI_MODEL,
             contents=prompt,
         )
 
-        text = getattr(response, "text", None)
+        sql = clean_sql(response.text)
 
-        if not text:
-            return None
+        return sql
 
-        sql = clean_sql(text)
-
-        if validate_sql(sql):
-            return sql
-
-    except Exception:
-        print("Gemini SQL generation failed:")
+    except Exception as error:
         traceback.print_exc()
 
-    return None
+        raise HTTPException(
+            status_code=500,
+            detail=f"Gemini error: {str(error)}"
+        )
 
 
 # ============================================================
-# HEALTH CHECK
+# ROOT
 # ============================================================
 
 @app.get("/")
@@ -397,66 +322,189 @@ def root():
     }
 
 
+# ============================================================
+# HEALTH
+# ============================================================
+
 @app.get("/health")
 def health():
+    clickhouse_status = client is not None
+    gemini_status = gemini is not None
+
     return {
         "status": "ok",
-        "clickhouse": clickhouse_client is not None,
-        "gemini": gemini_client is not None,
-        "model": GEMINI_MODEL,
+        "clickhouse": clickhouse_status,
+        "gemini": gemini_status,
     }
 
 
 # ============================================================
-# ASK ENDPOINT
+# MOVIES
+# ============================================================
+
+@app.get("/movies")
+def get_movies():
+    """
+    Return movies from ClickHouse.
+    """
+
+    if client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="ClickHouse connection is not available."
+        )
+
+    try:
+        result = client.query("""
+            SELECT
+                id,
+                title,
+                genre,
+                release_year,
+                rating,
+                revenue
+            FROM default.movies
+            ORDER BY revenue DESC
+        """)
+
+        movies = []
+
+        for row in result.result_rows:
+            movie = {}
+
+            for index, column in enumerate(result.column_names):
+                movie[column] = format_value(row[index])
+
+            movies.append(movie)
+
+        return {
+            "success": True,
+            "count": len(movies),
+            "columns": result.column_names,
+            "movies": movies,
+        }
+
+    except Exception as error:
+        traceback.print_exc()
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load movies: {str(error)}"
+        )
+
+
+# ============================================================
+# HISTORY
+# ============================================================
+
+@app.get("/history")
+def get_history():
+    """
+    Return recent query history if the history table exists.
+    """
+
+    if client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="ClickHouse connection is not available."
+        )
+
+    try:
+
+        # Check whether a history table exists.
+        tables = client.query("""
+            SELECT name
+            FROM system.tables
+            WHERE database = 'default'
+              AND name = 'query_history'
+        """)
+
+        if not tables.result_rows:
+            return {
+                "success": True,
+                "history": [],
+                "message": "No query_history table found.",
+            }
+
+        result = client.query("""
+            SELECT *
+            FROM default.query_history
+            ORDER BY 1 DESC
+            LIMIT 50
+        """)
+
+        history = []
+
+        for row in result.result_rows:
+            item = {}
+
+            for index, column in enumerate(result.column_names):
+                item[column] = format_value(row[index])
+
+            history.append(item)
+
+        return {
+            "success": True,
+            "columns": result.column_names,
+            "history": history,
+        }
+
+    except Exception as error:
+        traceback.print_exc()
+
+        return {
+            "success": True,
+            "history": [],
+            "message": str(error),
+        }
+
+
+# ============================================================
+# ASK AI
 # ============================================================
 
 @app.post("/ask")
-def ask_question(request: QuestionRequest):
+def ask_ai(request: QuestionRequest):
+    """
+    Convert natural language into SQL,
+    execute it in ClickHouse,
+    and return the result.
+    """
 
     question = request.question.strip()
 
     if not question:
         raise HTTPException(
             status_code=400,
-            detail="Question cannot be empty.",
+            detail="Question cannot be empty."
+        )
+
+    if len(question) > 1000:
+        raise HTTPException(
+            status_code=400,
+            detail="Question is too long."
+        )
+
+    if client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="ClickHouse connection is not available."
         )
 
     # --------------------------------------------------------
     # Generate SQL
     # --------------------------------------------------------
 
-    sql_source = "Gemini"
-
-    sql = generate_sql_with_gemini(question)
-
-    # --------------------------------------------------------
-    # Local fallback
-    # --------------------------------------------------------
-
-    if not sql:
-        sql = local_sql_fallback(question)
-        sql_source = "Local Fallback"
-
-    if not sql:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "Unable to generate SQL for this question. "
-                "Please try another movie analytics question."
-            ),
-        )
+    sql = generate_sql(question)
 
     # --------------------------------------------------------
     # Validate SQL
     # --------------------------------------------------------
 
-    sql = clean_sql(sql)
-
-    if not validate_sql(sql):
+    if not is_safe_sql(sql):
         raise HTTPException(
             status_code=400,
-            detail="Generated SQL failed the safety validation.",
+            detail="Generated SQL was rejected for safety reasons."
         )
 
     # --------------------------------------------------------
@@ -464,42 +512,71 @@ def ask_question(request: QuestionRequest):
     # --------------------------------------------------------
 
     try:
-        columns, rows = execute_query(sql)
+
+        result = client.query(sql)
+
+        rows = []
+
+        for row in result.result_rows:
+            item = {}
+
+            for index, column in enumerate(result.column_names):
+                item[column] = format_value(row[index])
+
+            rows.append(item)
+
+        # ----------------------------------------------------
+        # Also provide array format for frontend compatibility
+        # ----------------------------------------------------
+
+        result_arrays = []
+
+        for row in result.result_rows:
+            result_arrays.append([
+                format_value(value)
+                for value in row
+            ])
+
+        return {
+            "success": True,
+            "question": question,
+            "sql": sql,
+            "sql_source": "Gemini AI",
+            "columns": result.column_names,
+            "results": result_arrays,
+            "rows": rows,
+            "count": len(rows),
+        }
 
     except Exception as error:
-        print("ClickHouse query failed:")
         traceback.print_exc()
 
         raise HTTPException(
             status_code=500,
-            detail=f"Database query failed: {str(error)}",
+            detail=f"ClickHouse query failed: {str(error)}"
         )
 
-    # --------------------------------------------------------
-    # Return response
-    # --------------------------------------------------------
-
-    return {
-        "success": True,
-        "question": question,
-        "sql": sql,
-        "sql_source": sql_source,
-        "columns": columns,
-        "rows": rows,
-        "row_count": len(rows),
-    }
-
 
 # ============================================================
-# RUN LOCALLY
+# STARTUP
 # ============================================================
 
-if __name__ == "__main__":
-    import uvicorn
+@app.on_event("startup")
+def startup_event():
+    print("=" * 60)
+    print("CineAnalyst AI API")
+    print("Version: 2.0.0")
+    print("Status: starting")
+    print("=" * 60)
 
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
-        reload=True,
+    print(
+        "ClickHouse:",
+        "CONNECTED" if client else "NOT CONNECTED"
     )
+
+    print(
+        "Gemini:",
+        "CONNECTED" if gemini else "NOT CONNECTED"
+    )
+
+    print("=" * 60)
