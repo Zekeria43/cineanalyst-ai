@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import "./App.css";
-const API_URL = "https://cineanalyst-ai.onrender.com";
 
+const API_URL = "https://cineanalyst-ai.onrender.com";
 
 const quickQuestions = [
   "Which movie generated the most revenue?",
@@ -11,6 +11,10 @@ const quickQuestions = [
   "How many movies are from USA?",
   "Which movies were released after 2000?",
 ];
+
+// ==========================================================
+// HELPERS
+// ==========================================================
 
 function formatMoney(value) {
   if (value === null || value === undefined) return "—";
@@ -44,6 +48,39 @@ function formatNumber(value) {
   return number.toLocaleString();
 }
 
+// ==========================================================
+// API FETCH WITH TIMEOUT
+// ==========================================================
+
+async function fetchWithTimeout(url, options = {}, timeout = 15000) {
+  const controller = new AbortController();
+
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, timeout);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+
+    return response;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("API timeout");
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ==========================================================
+// APP
+// ==========================================================
+
 function App() {
   const [page, setPage] = useState("dashboard");
 
@@ -63,22 +100,26 @@ function App() {
   // ==========================================================
 
   async function loadMovies() {
-    try {
-      setLoading(true);
-      setError("");
+    setLoading(true);
+    setError("");
 
+    try {
       console.log("=================================");
-      console.log("CineAnalyst API");
+      console.log("🎬 CineAnalyst API");
       console.log("API URL:", API_URL);
       console.log("Movies URL:", `${API_URL}/movies`);
       console.log("=================================");
 
-      const response = await fetch(`${API_URL}/movies`, {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
+      const response = await fetchWithTimeout(
+        `${API_URL}/movies`,
+        {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+          },
         },
-      });
+        15000
+      );
 
       console.log("Movies HTTP status:", response.status);
       console.log("Movies HTTP OK:", response.ok);
@@ -95,13 +136,29 @@ function App() {
         throw new Error("Backend returned success=false");
       }
 
-      setMovies(data.movies || []);
+      const loadedMovies = data.movies || [];
+
+      setMovies(loadedMovies);
+
+      console.log(
+        `✅ ${loadedMovies.length} movies loaded successfully`
+      );
+
+      return true;
     } catch (err) {
-      console.error("MOVIES ERROR:", err);
+      console.error("❌ MOVIES ERROR:", err);
+
+      let message = err.message || "Unknown error";
+
+      if (err.name === "AbortError") {
+        message = "API timeout";
+      }
 
       setError(
-        `Impossible de charger les films. ${err.message || ""}`
+        `Impossible de charger les films. ${message}`
       );
+
+      throw err;
     } finally {
       setLoading(false);
     }
@@ -113,34 +170,154 @@ function App() {
 
   async function loadHistory() {
     try {
-      const response = await fetch(`${API_URL}/history`, {
-        method: "GET",
-        headers: {
-          Accept: "application/json",
+      console.log("Loading history...");
+
+      const response = await fetchWithTimeout(
+        `${API_URL}/history`,
+        {
+          method: "GET",
+          headers: {
+            Accept: "application/json",
+          },
         },
-      });
+        15000
+      );
+
+      console.log(
+        "History HTTP status:",
+        response.status
+      );
 
       if (!response.ok) {
+        console.log(
+          "History endpoint unavailable."
+        );
+
         return;
       }
 
       const data = await response.json();
 
+      console.log("History response:", data);
+
       if (data.success) {
         setHistory(data.history || []);
       }
     } catch (err) {
-      console.log("History unavailable:", err);
+      console.log(
+        "History unavailable:",
+        err.message
+      );
     }
   }
 
   // ==========================================================
-  // INITIAL LOAD
+  // INITIAL LOAD WITH RETRY
   // ==========================================================
 
   useEffect(() => {
-    loadMovies();
-    loadHistory();
+    let cancelled = false;
+
+    async function initializeApp() {
+      const maxAttempts = 5;
+
+      for (
+        let attempt = 1;
+        attempt <= maxAttempts;
+        attempt++
+      ) {
+        if (cancelled) return;
+
+        try {
+          console.log(
+            `🚀 CineAnalyst initialization attempt ${attempt}/${maxAttempts}`
+          );
+
+          await loadMovies();
+
+          if (cancelled) return;
+
+          await loadHistory();
+
+          if (cancelled) return;
+
+          console.log(
+            "✅ CineAnalyst initialized successfully"
+          );
+
+          return;
+        } catch (err) {
+          console.error(
+            `❌ Initialization attempt ${attempt} failed:`,
+            err
+          );
+
+          if (
+            attempt < maxAttempts &&
+            !cancelled
+          ) {
+            const delay = Math.min(
+              1000 * attempt,
+              5000
+            );
+
+            console.log(
+              `⏳ Retrying in ${delay / 1000}s...`
+            );
+
+            await new Promise((resolve) =>
+              setTimeout(resolve, delay)
+            );
+          }
+        }
+      }
+
+      if (!cancelled) {
+        console.error(
+          "❌ CineAnalyst API unavailable after all attempts."
+        );
+      }
+    }
+
+    initializeApp();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ==========================================================
+  // ONLINE EVENT
+  // ==========================================================
+
+  useEffect(() => {
+    async function handleOnline() {
+      console.log(
+        "🌐 Internet connection restored."
+      );
+
+      try {
+        await loadMovies();
+        await loadHistory();
+      } catch (error) {
+        console.error(
+          "Online reload failed:",
+          error
+        );
+      }
+    }
+
+    window.addEventListener(
+      "online",
+      handleOnline
+    );
+
+    return () => {
+      window.removeEventListener(
+        "online",
+        handleOnline
+      );
+    };
   }, []);
 
   // ==========================================================
@@ -149,11 +326,16 @@ function App() {
 
   async function askQuestion(customQuestion = null) {
     const finalQuestion = (
-      customQuestion !== null ? customQuestion : question
+      customQuestion !== null
+        ? customQuestion
+        : question
     ).trim();
 
     if (!finalQuestion) {
-      setAskError("Please enter a question.");
+      setAskError(
+        "Please enter a question."
+      );
+
       return;
     }
 
@@ -162,24 +344,47 @@ function App() {
       setAskError("");
       setAnswer(null);
 
-      console.log("ASK QUESTION:", finalQuestion);
+      console.log(
+        "🤖 ASK QUESTION:",
+        finalQuestion
+      );
 
-      const response = await fetch(`${API_URL}/ask`, {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
+      const response = await fetchWithTimeout(
+        `${API_URL}/ask`,
+        {
+          method: "POST",
+
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+          },
+
+          body: JSON.stringify({
+            question: finalQuestion,
+          }),
         },
-        body: JSON.stringify({
-          question: finalQuestion,
-        }),
-      });
+        60000
+      );
 
-      console.log("ASK HTTP STATUS:", response.status);
+      console.log(
+        "ASK HTTP STATUS:",
+        response.status
+      );
 
-      const data = await response.json();
+      let data;
 
-      console.log("ASK RESPONSE:", data);
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error(
+          "Invalid response from API."
+        );
+      }
+
+      console.log(
+        "ASK RESPONSE:",
+        data
+      );
 
       if (!response.ok) {
         const message =
@@ -195,19 +400,33 @@ function App() {
 
       setHistory((previous) => [
         {
-          question: data.question,
+          question:
+            data.question ||
+            finalQuestion,
+
           sql: data.sql,
-          sql_source: data.sql_source,
-          columns: data.columns,
-          results: data.results,
+
+          sql_source:
+            data.sql_source,
+
+          columns:
+            data.columns || [],
+
+          results:
+            data.results || data.rows || [],
         },
+
         ...previous,
       ]);
     } catch (err) {
-      console.error("ASK ERROR:", err);
+      console.error(
+        "❌ ASK ERROR:",
+        err
+      );
 
       setAskError(
-        err.message || "Unable to process the question."
+        err.message ||
+          "Unable to process the question."
       );
     } finally {
       setAsking(false);
@@ -221,6 +440,22 @@ function App() {
   function navigate(target) {
     setPage(target);
     setError("");
+    setAskError("");
+  }
+
+  // ==========================================================
+  // MANUAL REFRESH
+  // ==========================================================
+
+  async function handleRefresh() {
+    try {
+      await loadMovies();
+    } catch (error) {
+      console.error(
+        "Manual refresh failed:",
+        error
+      );
+    }
   }
 
   // ==========================================================
@@ -238,21 +473,33 @@ function App() {
     }
 
     const topRevenue = [...movies].sort(
-      (a, b) => Number(b.revenue || 0) - Number(a.revenue || 0)
+      (a, b) =>
+        Number(b.revenue || 0) -
+        Number(a.revenue || 0)
     )[0];
 
     const topRated = [...movies].sort(
-      (a, b) => Number(b.rating || 0) - Number(a.rating || 0)
+      (a, b) =>
+        Number(b.rating || 0) -
+        Number(a.rating || 0)
     )[0];
 
     const ratings = movies
-      .map((movie) => Number(movie.rating))
-      .filter((rating) => !Number.isNaN(rating));
+      .map((movie) =>
+        Number(movie.rating)
+      )
+      .filter(
+        (rating) =>
+          !Number.isNaN(rating)
+      );
 
     const averageRating =
       ratings.length > 0
-        ? ratings.reduce((sum, rating) => sum + rating, 0) /
-          ratings.length
+        ? ratings.reduce(
+            (sum, rating) =>
+              sum + rating,
+            0
+          ) / ratings.length
         : 0;
 
     return {
@@ -270,19 +517,27 @@ function App() {
   function Dashboard() {
     return (
       <main className="main-content">
+
         <div className="page-header">
+
           <div>
             <h1>Dashboard</h1>
-            <p>Overview of your movie database</p>
+
+            <p>
+              Overview of your movie database
+            </p>
           </div>
 
           <button
             className="refresh-button"
-            onClick={loadMovies}
+            onClick={handleRefresh}
             disabled={loading}
           >
-            ↻ Refresh
+            {loading
+              ? "↻ Loading..."
+              : "↻ Refresh"}
           </button>
+
         </div>
 
         {error && (
@@ -292,33 +547,43 @@ function App() {
         )}
 
         <section className="hero-card">
+
           <div className="hero-label">
             MOVIE DATA INTELLIGENCE
           </div>
 
-          <h2>Welcome to CineAnalyst AI</h2>
+          <h2>
+            Welcome to CineAnalyst AI
+          </h2>
 
           <p>
-            Explore your movie database using natural language
-            and AI-powered SQL analytics.
+            Explore your movie database using
+            natural language and AI-powered
+            SQL analytics.
           </p>
 
           <button
             className="primary-button"
-            onClick={() => navigate("ask")}
+            onClick={() =>
+              navigate("ask")
+            }
           >
             Ask a question →
           </button>
+
         </section>
 
         <section className="stats-grid">
+
           <StatCard
             icon="🎬"
             title="Total Movies"
             value={
               loading
                 ? "..."
-                : formatNumber(statistics.total)
+                : formatNumber(
+                    statistics.total
+                  )
             }
             subtitle="Movies in database"
           />
@@ -328,7 +593,10 @@ function App() {
             title="Top Revenue"
             value={
               statistics.topRevenue
-                ? formatMoney(statistics.topRevenue.revenue)
+                ? formatMoney(
+                    statistics.topRevenue
+                      .revenue
+                  )
                 : "—"
             }
             subtitle={
@@ -356,21 +624,29 @@ function App() {
             title="Average Rating"
             value={
               statistics.averageRating
-                ? statistics.averageRating.toFixed(2)
+                ? statistics.averageRating.toFixed(
+                    2
+                  )
                 : "—"
             }
             subtitle="Average movie rating"
           />
+
         </section>
 
         <section className="content-card">
+
           <div className="section-header">
+
             <div>
               <h2>Movies</h2>
+
               <p>
-                {movies.length} movies loaded from ClickHouse
+                {movies.length} movies loaded
+                from ClickHouse
               </p>
             </div>
+
           </div>
 
           {loading ? (
@@ -382,9 +658,13 @@ function App() {
               No movies found.
             </div>
           ) : (
-            <MovieTable movies={movies} />
+            <MovieTable
+              movies={movies}
+            />
           )}
+
         </section>
+
       </main>
     );
   }
@@ -396,26 +676,39 @@ function App() {
   function AskPage() {
     return (
       <main className="main-content">
+
         <div className="page-header">
+
           <div>
-            <h1>Ask CineAnalyst AI</h1>
+            <h1>
+              Ask CineAnalyst AI
+            </h1>
+
             <p>
-              Ask questions about your movie database in
-              natural language.
+              Ask questions about your movie
+              database in natural language.
             </p>
           </div>
+
         </div>
 
         <section className="content-card ask-card">
+
           <div className="ask-input-row">
+
             <input
               type="text"
               value={question}
               onChange={(event) =>
-                setQuestion(event.target.value)
+                setQuestion(
+                  event.target.value
+                )
               }
               onKeyDown={(event) => {
-                if (event.key === "Enter") {
+                if (
+                  event.key === "Enter" &&
+                  !asking
+                ) {
                   askQuestion();
                 }
               }}
@@ -425,31 +718,44 @@ function App() {
 
             <button
               className="primary-button"
-              onClick={() => askQuestion()}
+              onClick={() =>
+                askQuestion()
+              }
               disabled={asking}
             >
-              {asking ? "Analyzing..." : "Ask AI"}
+              {asking
+                ? "Analyzing..."
+                : "Ask AI"}
             </button>
+
           </div>
 
           <div className="quick-questions">
-            <h3>Quick questions</h3>
+
+            <h3>
+              Quick questions
+            </h3>
 
             <div className="quick-grid">
-              {quickQuestions.map((item) => (
-                <button
-                  key={item}
-                  className="quick-button"
-                  onClick={() => {
-                    setQuestion(item);
-                    askQuestion(item);
-                  }}
-                  disabled={asking}
-                >
-                  {item}
-                </button>
-              ))}
+
+              {quickQuestions.map(
+                (item) => (
+                  <button
+                    key={item}
+                    className="quick-button"
+                    onClick={() => {
+                      setQuestion(item);
+                      askQuestion(item);
+                    }}
+                    disabled={asking}
+                  >
+                    {item}
+                  </button>
+                )
+              )}
+
             </div>
+
           </div>
 
           {askError && (
@@ -459,9 +765,13 @@ function App() {
           )}
 
           {answer && (
-            <AnswerCard answer={answer} />
+            <AnswerCard
+              answer={answer}
+            />
           )}
+
         </section>
+
       </main>
     );
   }
@@ -473,77 +783,149 @@ function App() {
   function HistoryPage() {
     return (
       <main className="main-content">
+
         <div className="page-header">
+
           <div>
             <h1>History</h1>
-            <p>Previous questions and generated SQL.</p>
+
+            <p>
+              Previous questions and
+              generated SQL.
+            </p>
           </div>
+
         </div>
 
         <section className="content-card">
+
           {history.length === 0 ? (
             <div className="empty-state">
               No questions yet.
             </div>
           ) : (
             <div className="history-list">
-              {history.map((item, index) => (
-                <div
-                  className="history-item"
-                  key={`${item.question}-${index}`}
-                >
-                  <h3>{item.question}</h3>
 
-                  {item.sql && (
-                    <pre>{item.sql}</pre>
-                  )}
+              {history.map(
+                (item, index) => (
 
-                  {item.results && (
-                    <div className="history-result">
-                      {item.results.map((row, rowIndex) => (
-                        <div key={rowIndex}>
-                          {row.map((value, columnIndex) => (
-                            <span key={columnIndex}>
-                              {String(value)}
-                            </span>
-                          ))}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              ))}
+                  <div
+                    className="history-item"
+                    key={`${item.question}-${index}`}
+                  >
+
+                    <h3>
+                      {item.question}
+                    </h3>
+
+                    {item.sql && (
+                      <pre>
+                        {item.sql}
+                      </pre>
+                    )}
+
+                    {item.results && (
+                      <div className="history-result">
+
+                        {item.results.map(
+                          (
+                            row,
+                            rowIndex
+                          ) => (
+
+                            <div
+                              key={
+                                rowIndex
+                              }
+                            >
+
+                              {Array.isArray(
+                                row
+                              )
+                                ? row.map(
+                                    (
+                                      value,
+                                      columnIndex
+                                    ) => (
+                                      <span
+                                        key={
+                                          columnIndex
+                                        }
+                                      >
+                                        {String(
+                                          value
+                                        )}
+                                      </span>
+                                    )
+                                  )
+                                : (
+                                    <span>
+                                      {JSON.stringify(
+                                        row
+                                      )}
+                                    </span>
+                                  )}
+
+                            </div>
+
+                          )
+                        )}
+
+                      </div>
+                    )}
+
+                  </div>
+
+                )
+              )}
+
             </div>
           )}
+
         </section>
+
       </main>
     );
   }
 
   // ==========================================================
-  // NAVIGATION SIDEBAR
+  // APP LAYOUT
   // ==========================================================
 
   return (
     <div className="app">
+
       <aside className="sidebar">
+
         <div className="logo">
-          <div className="logo-icon">🎬</div>
+
+          <div className="logo-icon">
+            🎬
+          </div>
 
           <div>
-            <strong>CineAnalyst</strong>
-            <span>AI</span>
+            <strong>
+              CineAnalyst
+            </strong>
+
+            <span>
+              AI
+            </span>
           </div>
+
         </div>
 
         <nav>
+
           <button
             className={
               page === "dashboard"
                 ? "nav-item active"
                 : "nav-item"
             }
-            onClick={() => navigate("dashboard")}
+            onClick={() =>
+              navigate("dashboard")
+            }
           >
             <span>📊</span>
             Dashboard
@@ -555,7 +937,9 @@ function App() {
                 ? "nav-item active"
                 : "nav-item"
             }
-            onClick={() => navigate("ask")}
+            onClick={() =>
+              navigate("ask")
+            }
           >
             <span>🤖</span>
             Ask AI
@@ -567,28 +951,50 @@ function App() {
                 ? "nav-item active"
                 : "nav-item"
             }
-            onClick={() => navigate("history")}
+            onClick={() =>
+              navigate("history")
+            }
           >
             <span>🕘</span>
             History
           </button>
+
         </nav>
 
         <div className="sidebar-status">
+
           <div className="status-dot"></div>
 
           <div>
-            <strong>Backend Online</strong>
-            <small>Render API</small>
+            <strong>
+              Backend Online
+            </strong>
+
+            <small>
+              Render API
+            </small>
           </div>
+
         </div>
+
       </aside>
 
       <div className="page-container">
-        {page === "dashboard" && <Dashboard />}
-        {page === "ask" && <AskPage />}
-        {page === "history" && <HistoryPage />}
+
+        {page === "dashboard" && (
+          <Dashboard />
+        )}
+
+        {page === "ask" && (
+          <AskPage />
+        )}
+
+        {page === "history" && (
+          <HistoryPage />
+        )}
+
       </div>
+
     </div>
   );
 }
@@ -605,15 +1011,27 @@ function StatCard({
 }) {
   return (
     <div className="stat-card">
+
       <div className="stat-icon">
         {icon}
       </div>
 
       <div className="stat-content">
-        <span>{title}</span>
-        <strong>{value}</strong>
-        <small>{subtitle}</small>
+
+        <span>
+          {title}
+        </span>
+
+        <strong>
+          {value}
+        </strong>
+
+        <small>
+          {subtitle}
+        </small>
+
       </div>
+
     </div>
   );
 }
@@ -625,8 +1043,11 @@ function StatCard({
 function MovieTable({ movies }) {
   return (
     <div className="table-wrapper">
+
       <table>
+
         <thead>
+
           <tr>
             <th>Movie</th>
             <th>Revenue</th>
@@ -635,38 +1056,56 @@ function MovieTable({ movies }) {
             <th>Genre</th>
             <th>Year</th>
           </tr>
+
         </thead>
 
         <tbody>
-          {movies.map((movie, index) => (
-            <tr key={`${movie.title}-${index}`}>
-              <td>
-                <strong>{movie.title}</strong>
-              </td>
 
-              <td>
-                {formatMoney(movie.revenue)}
-              </td>
+          {movies.map(
+            (movie, index) => (
 
-              <td>
-                ⭐ {movie.rating}
-              </td>
+              <tr
+                key={`${movie.title}-${index}`}
+              >
 
-              <td>
-                {movie.country}
-              </td>
+                <td>
+                  <strong>
+                    {movie.title}
+                  </strong>
+                </td>
 
-              <td>
-                {movie.genre}
-              </td>
+                <td>
+                  {formatMoney(
+                    movie.revenue
+                  )}
+                </td>
 
-              <td>
-                {movie.release_year}
-              </td>
-            </tr>
-          ))}
+                <td>
+                  ⭐ {movie.rating}
+                </td>
+
+                <td>
+                  {movie.country || "—"}
+                </td>
+
+                <td>
+                  {movie.genre || "—"}
+                </td>
+
+                <td>
+                  {movie.release_year ||
+                    "—"}
+                </td>
+
+              </tr>
+
+            )
+          )}
+
         </tbody>
+
       </table>
+
     </div>
   );
 }
@@ -676,67 +1115,147 @@ function MovieTable({ movies }) {
 // ==========================================================
 
 function AnswerCard({ answer }) {
+  const results =
+    answer.results ||
+    answer.rows ||
+    [];
+
   return (
     <div className="answer-card">
+
       <div className="answer-header">
+
         <div>
+
           <span className="answer-label">
             AI ANALYSIS
           </span>
 
-          <h2>{answer.question}</h2>
+          <h2>
+            {answer.question}
+          </h2>
+
         </div>
 
         <span className="source-badge">
           {answer.sql_source || "AI"}
         </span>
+
       </div>
 
       {answer.sql && (
         <div className="sql-section">
-          <h3>Generated SQL</h3>
 
-          <pre>{answer.sql}</pre>
+          <h3>
+            Generated SQL
+          </h3>
+
+          <pre>
+            {answer.sql}
+          </pre>
+
         </div>
       )}
 
       <div className="result-section">
-        <h3>Results</h3>
 
-        {answer.results?.length ? (
+        <h3>
+          Results
+        </h3>
+
+        {results.length ? (
+
           <div className="table-wrapper">
+
             <table>
+
               <thead>
+
                 <tr>
-                  {answer.columns?.map((column) => (
-                    <th key={column}>
-                      {column}
-                    </th>
-                  ))}
+
+                  {answer.columns?.map(
+                    (column) => (
+                      <th key={column}>
+                        {column}
+                      </th>
+                    )
+                  )}
+
                 </tr>
+
               </thead>
 
               <tbody>
-                {answer.results.map((row, rowIndex) => (
-                  <tr key={rowIndex}>
-                    {row.map((value, columnIndex) => (
-                      <td key={columnIndex}>
-                        {typeof value === "number"
-                          ? value.toLocaleString()
-                          : String(value ?? "—")}
-                      </td>
-                    ))}
-                  </tr>
-                ))}
+
+                {results.map(
+                  (row, rowIndex) => (
+
+                    <tr
+                      key={rowIndex}
+                    >
+
+                      {Array.isArray(row)
+                        ? row.map(
+                            (
+                              value,
+                              columnIndex
+                            ) => (
+                              <td
+                                key={
+                                  columnIndex
+                                }
+                              >
+                                {typeof value ===
+                                "number"
+                                  ? value.toLocaleString()
+                                  : String(
+                                      value ??
+                                        "—"
+                                    )}
+                              </td>
+                            )
+                          )
+                        : Object.values(
+                            row || {}
+                          ).map(
+                            (
+                              value,
+                              columnIndex
+                            ) => (
+                              <td
+                                key={
+                                  columnIndex
+                                }
+                              >
+                                {String(
+                                  value ??
+                                    "—"
+                                )}
+                              </td>
+                            )
+                          )}
+
+                    </tr>
+
+                  )
+                )}
+
               </tbody>
+
             </table>
+
           </div>
+
         ) : (
+
           <div className="empty-state">
             No results returned.
           </div>
+
         )}
+
       </div>
+
     </div>
   );
 }
